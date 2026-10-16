@@ -1,67 +1,50 @@
-# Orbit DevTools: architecture and boundaries
+# Orbit DevTools architecture
 
-## Responsibility
+`orbit-devtools` is an optional local-development package. Its current implementation is
+`ConfigWatcher`, which polls one TOML-backed configuration file, validates a named Pydantic
+section, and submits changed values through Core's normal `Config.reload_section()` observer path.
+Applications that do not install and register the package perform no file polling.
 
-`orbit-devtools` contains optional local development helpers for Orbit applications. The first
-included utility watches one TOML-backed extension-configuration section and submits validated
-updates through Core's configuration contract.
-
-```bash
-pip install orbit-core orbit-devtools
+```text
+TOML file ── bounded Core parser ── Pydantic model ── Config.reload_section()
+                                                        └── observer accept/veto
 ```
 
-```python
-from pathlib import Path
+The watcher is deliberately outside Core: local reload behavior is optional developer tooling,
+while Core owns configuration contracts, validation and atomic replacement, observers, and
+application lifecycle. The package does not add a file watcher daemon, web framework, remote
+configuration service, or provider SDK.
 
-from orbit import Application, ApplicationConfig
-from pydantic import BaseModel, ConfigDict
+## Initial observation and updates
 
-from orbit_devtools import ConfigWatcher
+The watcher fingerprints a bounded file snapshot using filesystem metadata and a SHA-256 content
+digest. The first observation is parsed and validated but does not mutate the already-composed
+configuration section. Later changed snapshots are loaded through Core's `load_config()` with the
+configured values/environment/prefix inputs and the supplied model. Before applying the candidate,
+the watcher fingerprints the file again; a file changed during parsing is rejected and picked up on
+a later poll.
 
+Core's `reload_section()` performs the atomic replacement and invokes observers. If validation or
+an observer rejects the candidate, the previous section remains active and the watcher exposes only
+a generic `last_error` marker. A successful replacement advances the observed fingerprint. This is
+poll-based eventually observed local reload, not a filesystem event subscription or a distributed
+configuration protocol.
 
-class FeatureSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    enabled: bool
+## Bounds and ownership
 
+The watcher accepts one lowercase section identifier, a bounded file size (default 1 MiB, at most
+64 MiB), a poll interval from 50 ms to one hour, and Core's bounded configuration prefix. File
+reads, hashing, and parsing run through `asyncio.to_thread()` so they do not block the application
+event loop. Polls on one watcher instance are serialized.
 
-app = Application(ApplicationConfig(name="example"))
-app.config.register("feature", FeatureSettings(enabled=False))
-app.register_config_watcher(
-    ConfigWatcher(app.config, "feature", FeatureSettings, Path("settings.toml"))
-)
-```
+Core's application owns watcher lifecycle when registered via `register_config_watcher()`. The
+watcher starts after the application is composed and stops during shutdown. It does not change the
+initial configuration merely because a file exists. The watcher owns no file descriptor between
+polls and creates no child process or network connection.
 
-The watcher starts and stops with the owning application. It validates the initial file without
-changing the already-composed section, and only publishes later updates accepted by Core's
-observers. File I/O and parsing run off the event loop; reads are bounded, and errors exposed by
-the watcher omit file paths, configuration values, and observer messages. File watching is
-opt-in: applications that do not install this package do not poll the filesystem.
+## Intended boundary
 
-## Declared dependencies
-
-The following dependency declarations come from the checked-in manifests. Optional groups and development dependencies are called out separately.
-
-### `pyproject.toml`
-- `orbit-core>=0.1.0a1,<0.2`
-- Optional `dev` group: `pytest>=8,<10`, `pytest-asyncio>=0.24,<2`, `ruff>=0.8,<1`, `mypy>=1.13,<2`.
-
-Declared dependencies do not mean that optional providers or services are bundled with this package.
-
-## Implementation layout
-
-Representative implementation files in this checkout:
-
-- `src/orbit_devtools/__init__.py`
-- `src/orbit_devtools/configuration/__init__.py`
-- `src/orbit_devtools/configuration/watcher.py`
-
-## Public contract and scope
-
-## Status
-
-This package is pre-alpha; its API is not stable and it is not yet a published release. It supports
-Python 3.11 through 3.14.
-
-## Boundary rules
-
-Keep provider SDKs, credentials, transports, and provider-specific error translation in provider adapters. Keep reusable capability contracts in the matching capability package and lifecycle orchestration in Core. Apply the relevant layer for this repository and preserve the dependency direction shown above.
+This helper targets local development. Production configuration should use the deployment's
+validated, access-controlled configuration and secret-delivery process; polling a mutable local
+file does not provide distributed consistency, authenticated change history, atomic cross-instance
+rollout, or secret rotation guarantees.

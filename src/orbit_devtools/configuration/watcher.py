@@ -35,6 +35,8 @@ from pydantic import BaseModel
 T = TypeVar("T", bound=BaseModel)
 _SECTION_NAME = re.compile(r"^[a-z][a-z0-9_.-]{0,62}$")
 _Fingerprint = tuple[int, int, int, str]
+_MIN_INTERVAL_SECONDS = 0.05
+_MAX_INTERVAL_SECONDS = 3_600.0
 
 
 def _finite_number(value: object) -> bool:
@@ -72,8 +74,10 @@ class ConfigWatcher(Generic[T]):
             raise TypeError("ConfigWatcher requires a Config owner.")
         if not isinstance(section, str) or _SECTION_NAME.fullmatch(section) is None:
             raise ValueError("Configuration watcher sections must be lowercase identifiers.")
-        if not _finite_number(interval) or interval <= 0:
-            raise ValueError("interval must be finite and positive.")
+        if not _finite_number(interval) or not (
+            _MIN_INTERVAL_SECONDS <= interval <= _MAX_INTERVAL_SECONDS
+        ):
+            raise ValueError("interval must be finite and between 0.05 and 3600 seconds.")
         if (
             isinstance(max_file_bytes, bool)
             or not isinstance(max_file_bytes, int)
@@ -103,6 +107,7 @@ class ConfigWatcher(Generic[T]):
         self._fingerprint: _Fingerprint | None = None
         self._task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
+        self._poll_lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._last_error: Exception | None = None
 
@@ -148,7 +153,12 @@ class ConfigWatcher(Generic[T]):
         )
 
     async def run_once(self) -> ConfigChange | None:
-        """Poll once; unchanged files and initial observation do not trigger a reload."""
+        """Poll once; serialize file observations and leave the initial config unchanged."""
+        async with self._poll_lock:
+            return await self._run_once()
+
+    async def _run_once(self) -> ConfigChange | None:
+        """Read, validate, and conditionally publish one stable file snapshot."""
         try:
             fingerprint = await asyncio.to_thread(self._fingerprint_file)
         except Exception:

@@ -1,57 +1,39 @@
-# Orbit DevTools: operations and security
+# Orbit DevTools operations
 
-This guide organizes runtime behavior documented by the package. It does not certify production readiness. Verify provider/client versions, permissions, transport security, limits, and failure behavior in the target environment before release.
+`ConfigWatcher` is an opt-in local development helper. Register it with the owning Core application
+after registering and freezing the configuration section it observes. The app starts and stops the
+watcher with its lifecycle. Do not create several watchers for the same section/file unless multiple
+independent reload attempts are intentional.
 
-## Configuration surface
+## Inputs and polling
 
-Environment names found in the package README:
+The watcher accepts a `Config`, lowercase section name, Pydantic model class, and `pathlib.Path`.
+Optional `values`, `environment`, and `prefix` are passed to Core's `load_config()`; they are not
+separate watcher-specific configuration stores. The default poll interval is one second, bounded
+from 50 ms to one hour. The default file limit is 1 MiB, configurable up to 64 MiB. Lower limits
+reduce hashing/parsing cost and memory pressure. Avoid extremely short intervals in development
+because each poll performs filesystem work and computes a digest.
 
-The package README does not name `ORBIT_*` variables. Use its typed constructors and application configuration, and confirm exact runtime inputs in the implementation before deployment.
+The watcher polls rather than receiving filesystem events. It reads and hashes a bounded file in a
+worker thread, parses away from the event loop, and checks the fingerprint again before publishing
+a candidate. An edit during parsing is rejected and will be observed on a later pass. Multiple
+manual `run_once()` calls on the same instance serialize with one another.
 
-Use the package README's constructor and deployment examples. Store credentials in a secret manager and avoid logging credentials, raw provider errors, request data, or opaque cursors.
+## Startup and reload behavior
 
-## Lifecycle, failure behavior, and limits
+The initial file is validated but does not replace the current configured section. A subsequent
+changed file is applied through Core's `reload_section()` and its observers. An invalid model or
+observer veto preserves the last accepted section. `last_error` returns a generic error without
+the path, parsed values, or original observer exception details. Check this property for local
+developer feedback; it is not a health endpoint or detailed diagnostics channel.
 
-`orbit-devtools` contains optional local development helpers for Orbit applications. The first
-included utility watches one TOML-backed extension-configuration section and submits validated
-updates through Core's configuration contract.
+## Shutdown and limitations
 
-```bash
-pip install orbit-core orbit-devtools
-```
+`stop()` signals the polling task and waits for an in-progress bounded file operation to finish.
+Core waits for watcher shutdown as part of its lifecycle. Keep file limits and poll intervals
+reasonable so local shutdown remains prompt.
 
-```python
-from pathlib import Path
-
-from orbit import Application, ApplicationConfig
-from pydantic import BaseModel, ConfigDict
-
-from orbit_devtools import ConfigWatcher
-
-
-class FeatureSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    enabled: bool
-
-
-app = Application(ApplicationConfig(name="example"))
-app.config.register("feature", FeatureSettings(enabled=False))
-app.register_config_watcher(
-    ConfigWatcher(app.config, "feature", FeatureSettings, Path("settings.toml"))
-)
-```
-
-The watcher starts and stops with the owning application. It validates the initial file without
-changing the already-composed section, and only publishes later updates accepted by Core's
-observers. File I/O and parsing run off the event loop; reads are bounded, and errors exposed by
-the watcher omit file paths, configuration values, and observer messages. File watching is
-opt-in: applications that do not install this package do not poll the filesystem.
-
-## Status
-
-This package is pre-alpha; its API is not stable and it is not yet a published release. It supports
-Python 3.11 through 3.14.
-
-## Production validation
-
-Validate startup/shutdown cleanup, timeout and cancellation behavior, concurrency and payload bounds where applicable, secret rotation and least-privilege access, data durability, backup/restore, and failover against the selected provider. Do not infer distributed or durable guarantees from an in-process API or fake-client tests.
+This helper does not watch directories, remote configuration sources, secrets rotation, or multiple
+application instances. It provides no distributed rollout, audit log, access-control policy,
+network endpoint, or production configuration control plane. Production deployments should use
+their established configuration and secret-management systems.

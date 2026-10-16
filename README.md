@@ -34,10 +34,13 @@ changing the already-composed section, and only publishes later updates accepted
 observers. File I/O and parsing run off the event loop; reads are bounded, and errors exposed by
 the watcher omit file paths, configuration values, and observer messages. File watching is
 opt-in: applications that do not install this package do not poll the filesystem.
+Polling intervals are bounded from 50 ms to one hour (default: one second), and file reads are
+bounded to 64 MiB (default: 1 MiB). Each poll hashes the bounded file to detect edits even when
+size and modification time do not change.
 
 ## Status
 
-This package is pre-alpha; its API is not stable and it is not yet a published release. It supports
+This package is alpha; its API is not stable and it is not yet a published release. It supports
 Python 3.11 through 3.14.
 
 ## Documentation

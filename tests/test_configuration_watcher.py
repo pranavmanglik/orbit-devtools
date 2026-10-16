@@ -182,7 +182,7 @@ async def test_file_io_runs_off_the_event_loop(tmp_path: Path, monkeypatch) -> N
 async def test_start_stop_and_restart_own_one_polling_task(tmp_path: Path) -> None:
     file = tmp_path / "config.toml"
     write_settings(file)
-    watcher = ConfigWatcher(make_config(), "database", Settings, file, interval=0.01)
+    watcher = ConfigWatcher(make_config(), "database", Settings, file, interval=0.05)
     await watcher.start()
     with pytest.raises(RuntimeError, match="already running"):
         await watcher.start()
@@ -206,7 +206,7 @@ async def test_application_owns_watcher_lifecycle(tmp_path: Path) -> None:
     write_settings(file)
     app = Application(ApplicationConfig(name="devtools-lifecycle"))
     app.config.register("database", Settings(database=Database(host="db-a", password="secret")))
-    watcher = ConfigWatcher(app.config, "database", Settings, file, interval=0.01)
+    watcher = ConfigWatcher(app.config, "database", Settings, file, interval=0.05)
     app.register_config_watcher(watcher)
 
     await app.startup()
@@ -221,7 +221,7 @@ def test_constructor_rejects_invalid_configuration_and_bounds(tmp_path: Path) ->
     write_settings(file)
     config = make_config()
 
-    for interval in (float("nan"), float("inf"), 0, True, "1"):
+    for interval in (float("nan"), float("inf"), 0, 0.001, 3_600.1, True, "1"):
         with pytest.raises(ValueError):
             ConfigWatcher(config, "database", Settings, file, interval=interval)
     for section in ("Database", "x" * 64):
@@ -238,3 +238,31 @@ def test_constructor_rejects_invalid_configuration_and_bounds(tmp_path: Path) ->
         ConfigWatcher(config, "database", object, file)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="pathlib.Path"):
         ConfigWatcher(config, "database", Settings, str(file))  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_manual_polls_are_serialized(tmp_path: Path, monkeypatch) -> None:
+    file = tmp_path / "config.toml"
+    write_settings(file)
+    watcher = ConfigWatcher(make_config(), "database", Settings, file)
+    assert await watcher.run_once() is None
+    write_settings(file, "db-b")
+    active = 0
+    peak = 0
+    original_load = watcher._load
+
+    async def tracked_load():
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.01)
+            return await original_load()
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(watcher, "_load", tracked_load)
+    await asyncio.gather(watcher.run_once(), watcher.run_once())
+
+    assert peak == 1
+    assert watcher._config.get("database").database.host == "db-b"
